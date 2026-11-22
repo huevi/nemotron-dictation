@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Carbon
 import OSLog
+import ServiceManagement
 
 private let hotKeySignature: OSType = 0x4E444943 // NDIC
 
@@ -287,6 +288,7 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
     private var fnItem: NSMenuItem!
     private let pasteItem = NSMenuItem(title: "Paste automatically", action: nil, keyEquivalent: "")
     private let copyItem = NSMenuItem(title: "Copy last transcript", action: nil, keyEquivalent: "")
+    private var loginItem: NSMenuItem!
     private var shortcut: EventHotKeyRef?
     private var toggleShortcut: EventHotKeyRef?
     private var handler: EventHandlerRef?
@@ -328,6 +330,8 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
         copyItem.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
         menu.addItem(copyItem)
         _ = addMenuAction("Setup…", symbol: "gearshape", action: #selector(showSetup), to: menu)
+        loginItem = addMenuAction("Open at Login", symbol: "arrow.right.to.line",
+                                  action: #selector(toggleOpenAtLogin), to: menu)
         menu.addItem(accessSeparator)
         microphoneItem = addMenuAction("Microphone Settings…", symbol: "mic",
                                        action: #selector(requestMicrophone), to: menu)
@@ -356,6 +360,9 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
             update("Ready", symbol: "mic")
         }
         if !settings.bool(forKey: "finishedSetup") { showSetup() }
+        if CommandLine.arguments.contains("--enable-open-at-login") {
+            setOpenAtLogin(true)
+        }
     }
 
     @objc private func showSetup() {
@@ -432,10 +439,38 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        switch SMAppService.mainApp.status {
+        case .enabled: loginItem.state = .on
+        case .requiresApproval: loginItem.state = .mixed
+        default: loginItem.state = .off
+        }
         microphoneItem.isHidden = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         accessibilityItem.isHidden = !settings.bool(forKey: "autoPaste") || AXIsProcessTrusted()
         fnItem.isHidden = fnTap != nil
         accessSeparator.isHidden = microphoneItem.isHidden && accessibilityItem.isHidden && fnItem.isHidden
+    }
+
+    @objc private func toggleOpenAtLogin() {
+        let status = SMAppService.mainApp.status
+        setOpenAtLogin(status != .enabled && status != .requiresApproval)
+    }
+
+    private func setOpenAtLogin(_ enabled: Bool) {
+        let service = SMAppService.mainApp
+        let registered = service.status == .enabled || service.status == .requiresApproval
+        do {
+            if enabled && !registered { try service.register() }
+            if !enabled && registered { try service.unregister() }
+            if enabled && service.status == .requiresApproval {
+                SMAppService.openSystemSettingsLoginItems()
+            }
+        } catch {
+            diagnostics.error("Could not change Open at Login: \(error.localizedDescription, privacy: .public)")
+            let alert = NSAlert(error: error)
+            alert.messageText = "Couldn’t change Open at Login"
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {

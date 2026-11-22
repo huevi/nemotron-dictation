@@ -20,6 +20,8 @@ The Intel build was tested end to end with a fresh model download and prerecorde
 4. Click in the setup test field, press **Control–Space**, say “This is my first dictation,” and press **Control–Space** again. The recording pill shows the timer, waveform, and stop and discard buttons. The smaller transcribing pill appears while the model runs.
 5. Click **Done**. Use the waveform icon in the menu bar to reopen **Setup…**, change automatic paste, copy the last transcript, or quit.
 
+To start Nemotron Dictation when you sign in, choose **Open at Login** from the waveform menu. Click it again to turn it off. If macOS asks for approval, enable it under **System Settings → General → Login Items & Extensions**.
+
 ## Shortcuts
 
 | Shortcut | Action |
