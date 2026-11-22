@@ -224,24 +224,24 @@ private final class RecordingIndicator: NSObject {
     @objc private func discard() { onDiscard?() }
 }
 
-private final class DictationMenuHeader: NSView {
-    private let detail = NSTextField(labelWithString: "Ready")
+private final class SpeechMenuHeader: NSView {
+    private let detail = NSTextField(labelWithString: "")
 
-    init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: 270, height: 60))
-        let icon = NSImageView(frame: NSRect(x: 17, y: 19, width: 25, height: 25))
-        icon.image = NSImage(systemSymbolName: "waveform.circle.fill", accessibilityDescription: nil)
-        icon.contentTintColor = .controlAccentColor
-        let name = NSTextField(labelWithString: "Nemotron Dictation")
-        name.frame = NSRect(x: 52, y: 33, width: 200, height: 18)
-        name.font = .systemFont(ofSize: 14, weight: .semibold)
-        detail.frame = NSRect(x: 52, y: 12, width: 200, height: 18)
+    init(name: String, symbol: String) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 58))
+        let icon = NSImageView(frame: NSRect(x: 17, y: 19, width: 22, height: 22))
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        icon.contentTintColor = .secondaryLabelColor
+        let title = NSTextField(labelWithString: name)
+        title.frame = NSRect(x: 48, y: 32, width: 216, height: 18)
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        detail.frame = NSRect(x: 48, y: 12, width: 216, height: 17)
         detail.font = .systemFont(ofSize: 11, weight: .medium)
         detail.textColor = .secondaryLabelColor
         detail.lineBreakMode = .byTruncatingTail
-        for view in [icon, name, detail] { addSubview(view) }
+        for view in [icon, title, detail] { addSubview(view) }
         setAccessibilityRole(.group)
-        setAccessibilityLabel("Nemotron Dictation")
+        setAccessibilityLabel(name)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -250,6 +250,45 @@ private final class DictationMenuHeader: NSView {
         detail.stringValue = text
         detail.toolTip = text
         setAccessibilityValue(text)
+    }
+}
+
+private final class ShortcutMenuRow: NSView {
+    private let label: NSTextField
+    private let keys: NSTextField
+    private let keyLabel: String
+
+    init(_ title: String, keys: String) {
+        label = NSTextField(labelWithString: title)
+        self.keys = NSTextField(labelWithString: keys)
+        keyLabel = keys
+        super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 23))
+        label.frame = NSRect(x: 19, y: 4, width: 151, height: 16)
+        label.font = .menuFont(ofSize: 0)
+        self.keys.frame = NSRect(x: 168, y: 4, width: 96, height: 16)
+        self.keys.font = .systemFont(ofSize: 12, weight: .medium)
+        self.keys.textColor = .secondaryLabelColor
+        self.keys.alignment = .right
+        addSubview(label)
+        addSubview(self.keys)
+        setAccessibilityRole(.group)
+        setAvailable(true)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func setAvailable(_ available: Bool) {
+        label.textColor = available ? .labelColor : .secondaryLabelColor
+        keys.stringValue = available ? keyLabel : "Unavailable"
+        setAccessibilityLabel("\(label.stringValue), \(keyLabel)")
+        setAccessibilityValue(available ? nil : "Unavailable")
+        toolTip = available ? nil : "\(keyLabel) is unavailable. See Setup."
+    }
+
+    func menuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        item.view = self
+        return item
     }
 }
 
@@ -281,13 +320,13 @@ private struct InsertionTarget {
 
 final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    private let menuHeader = DictationMenuHeader()
-    private let accessSeparator = NSMenuItem.separator()
-    private var microphoneItem: NSMenuItem!
-    private var accessibilityItem: NSMenuItem!
-    private var fnItem: NSMenuItem!
-    private let pasteItem = NSMenuItem(title: "Paste automatically", action: nil, keyEquivalent: "")
-    private let copyItem = NSMenuItem(title: "Copy last transcript", action: nil, keyEquivalent: "")
+    private let menuHeader = SpeechMenuHeader(name: "Nemotron Dictation", symbol: "waveform")
+    private let toggleRow = ShortcutMenuRow("Start / Stop Recording", keys: "⌃Space")
+    private let holdRow = ShortcutMenuRow("Hold to Talk", keys: "⌃⌥Space")
+    private var stopItem: NSMenuItem!
+    private var pasteItem: NSMenuItem!
+    private var copyItem: NSMenuItem!
+    private var setupItem: NSMenuItem!
     private var loginItem: NSMenuItem!
     private var shortcut: EventHotKeyRef?
     private var toggleShortcut: EventHotKeyRef?
@@ -296,13 +335,11 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
     private var recordingURL: URL?
     private var destination: InsertionTarget?
     private var recordingUsesToggle = false
-    private var fnTap: CFMachPort?
-    private var fnSource: CFRunLoopSource?
-    private var fnPressed = false
-    private var fnChord = false
     private var permissionTimer: Timer?
     private let indicator = RecordingIndicator()
-    private var awaitingTranscript = false
+    private var awaitingTranscript = false {
+        didSet { refreshStatus() }
+    }
     private var lastTranscript = ""
     private var micRequestInProgress = false
     private let settings = UserDefaults.standard
@@ -316,29 +353,15 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
         header.view = menuHeader
         menu.addItem(header)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem.sectionHeader(title: "Shortcuts"))
-        menu.addItem(shortcutRow("Start / stop", keys: "⌃ Space"))
-        menu.addItem(shortcutRow("Hold to talk", keys: "⌃ ⌥ Space"))
+        menu.addItem(toggleRow.menuItem())
+        menu.addItem(holdRow.menuItem())
+        stopItem = addMenuAction("Stop Recording", action: #selector(stopRecording), to: menu)
         menu.addItem(.separator())
-        pasteItem.target = self
-        pasteItem.action = #selector(togglePaste)
-        pasteItem.image = NSImage(systemSymbolName: "document.on.clipboard", accessibilityDescription: nil)
-        pasteItem.state = settings.bool(forKey: "autoPaste") ? .on : .off
-        menu.addItem(pasteItem)
-        copyItem.target = self
-        copyItem.action = #selector(copyLast)
-        copyItem.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
-        menu.addItem(copyItem)
-        _ = addMenuAction("Setup…", symbol: "gearshape", action: #selector(showSetup), to: menu)
-        loginItem = addMenuAction("Open at Login", symbol: "arrow.right.to.line",
-                                  action: #selector(toggleOpenAtLogin), to: menu)
-        menu.addItem(accessSeparator)
-        microphoneItem = addMenuAction("Microphone Settings…", symbol: "mic",
-                                       action: #selector(requestMicrophone), to: menu)
-        accessibilityItem = addMenuAction("Enable Automatic Paste…", symbol: "accessibility",
-                                          action: #selector(requestPasteAccess), to: menu)
-        fnItem = addMenuAction("Set Up Optional Fn Shortcut…", symbol: "globe",
-                               action: #selector(requestFnAccess), to: menu)
+        copyItem = addMenuAction("Copy Last Transcript", action: #selector(copyLast), to: menu)
+        pasteItem = addMenuAction("Paste Automatically", action: #selector(togglePaste), to: menu)
+        menu.addItem(.separator())
+        setupItem = addMenuAction("Setup…", action: #selector(showSetup), to: menu)
+        loginItem = addMenuAction("Open at Login", action: #selector(toggleOpenAtLogin), to: menu)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Nemotron Dictation", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.delegate = self
@@ -346,19 +369,13 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
 
         indicator.onStop = { [weak self] in self?.stopRecording() }
         indicator.onDiscard = { [weak self] in self?.discardRecording() }
-        installFnTap()
         permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            self?.installFnTap()
-            if self?.setup?.window?.isVisible == true { self?.refreshSetup() }
+            guard let self, self.setup?.window?.isVisible == true else { return }
+            self.refreshSetup()
+            self.refreshStatus()
         }
         registerHotKeys()
-        if ModelAssets.installedModel == nil {
-            update("Download the speech model in Setup", symbol: "arrow.down.circle")
-        } else if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
-            update("Allow microphone access in Setup", symbol: "mic.slash")
-        } else {
-            update("Ready", symbol: "mic")
-        }
+        refreshMenu()
         if !settings.bool(forKey: "finishedSetup") { showSetup() }
         if CommandLine.arguments.contains("--enable-open-at-login") {
             setOpenAtLogin(true)
@@ -396,13 +413,11 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
         if case .verifying = modelState { return }
         modelState = .downloading(0)
         refreshSetup()
+        refreshStatus()
         ModelAssets { [weak self] state in
             self?.modelState = state
-            if case .finished = state {
-                let ready = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-                self?.update(ready ? "Ready" : "Allow microphone access in Setup", symbol: "mic")
-            }
             self?.refreshSetup()
+            self?.refreshStatus()
         }.start()
     }
 
@@ -412,47 +427,59 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
         }
     }
 
-    private func shortcutRow(_ title: String, keys: String) -> NSMenuItem {
-        let item = NSMenuItem()
-        let row = NSView(frame: NSRect(x: 0, y: 0, width: 270, height: 24))
-        let name = NSTextField(labelWithString: title)
-        name.font = .systemFont(ofSize: 12)
-        name.frame = NSRect(x: 19, y: 4, width: 156, height: 16)
-        let key = NSTextField(labelWithString: keys)
-        key.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
-        key.textColor = .secondaryLabelColor
-        key.alignment = .right
-        key.frame = NSRect(x: 174, y: 4, width: 78, height: 16)
-        row.addSubview(name)
-        row.addSubview(key)
-        row.setAccessibilityRole(.group)
-        row.setAccessibilityLabel("\(title), \(keys)")
-        item.view = row
-        return item
-    }
-
-    private func addMenuAction(_ title: String, symbol: String, action: Selector, to menu: NSMenu) -> NSMenuItem {
+    private func addMenuAction(_ title: String, action: Selector, to menu: NSMenu) -> NSMenuItem {
         let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
         item.target = self
-        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         return item
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
+    func menuNeedsUpdate(_ menu: NSMenu) { refreshMenu() }
+
+    private func refreshMenu() {
+        refreshStatus()
+        toggleRow.setAvailable(toggleShortcut != nil)
+        holdRow.setAvailable(shortcut != nil)
+        stopItem.isHidden = recorder == nil
+        let autoPaste = settings.bool(forKey: "autoPaste")
+        let needsPasteAccess = autoPaste && !AXIsProcessTrusted()
+        pasteItem.state = needsPasteAccess ? .mixed : (autoPaste ? .on : .off)
+        pasteItem.toolTip = needsPasteAccess ? "Automatic paste needs Accessibility access." : nil
         switch SMAppService.mainApp.status {
-        case .enabled: loginItem.state = .on
-        case .requiresApproval: loginItem.state = .mixed
-        default: loginItem.state = .off
+        case .enabled:
+            loginItem.state = .on
+            loginItem.toolTip = nil
+        case .requiresApproval:
+            loginItem.state = .mixed
+            loginItem.toolTip = "Approve in Login Items & Extensions."
+        default:
+            loginItem.state = .off
+            loginItem.toolTip = nil
         }
-        microphoneItem.isHidden = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        accessibilityItem.isHidden = !settings.bool(forKey: "autoPaste") || AXIsProcessTrusted()
-        fnItem.isHidden = fnTap != nil
-        accessSeparator.isHidden = microphoneItem.isHidden && accessibilityItem.isHidden && fnItem.isHidden
+
+        if ModelAssets.installedModel == nil {
+            switch modelState {
+            case .downloading, .verifying: setupItem.title = "View Model Setup…"
+            case .failed: setupItem.title = "Retry Model Setup…"
+            default: setupItem.title = "Set Up Speech Model…"
+            }
+        } else if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
+            setupItem.title = "Set Up Microphone…"
+        } else if toggleShortcut == nil || shortcut == nil {
+            setupItem.title = "Set Up Shortcuts…"
+        } else if needsPasteAccess {
+            setupItem.title = "Set Up Automatic Paste…"
+        } else {
+            setupItem.title = "Setup…"
+        }
     }
 
     @objc private func toggleOpenAtLogin() {
         let status = SMAppService.mainApp.status
-        setOpenAtLogin(status != .enabled && status != .requiresApproval)
+        if status == .requiresApproval {
+            SMAppService.openSystemSettingsLoginItems()
+        } else {
+            setOpenAtLogin(status != .enabled)
+        }
     }
 
     private func setOpenAtLogin(_ enabled: Bool) {
@@ -474,7 +501,8 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item === copyItem { return !lastTranscript.isEmpty }
+        if item === copyItem { return recorder == nil && !awaitingTranscript && !lastTranscript.isEmpty }
+        if item === stopItem { return recorder != nil }
         return true
     }
 
@@ -518,82 +546,20 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
         diagnostics.notice("Control-Space registration: \(primary, privacy: .public); backup: \(backup, privacy: .public)")
     }
 
-    private func installFnTap() {
-        guard fnTap == nil, CGPreflightListenEventAccess() else { return }
-        let mask = (CGEventMask(1) << CGEventType.flagsChanged.rawValue) |
-                   (CGEventMask(1) << CGEventType.keyDown.rawValue)
-        guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
-                                          options: .listenOnly, eventsOfInterest: mask,
-                                          callback: { _, type, event, context in
-            if let context {
-                Unmanaged<DictationApp>.fromOpaque(context).takeUnretainedValue().handleFn(type, event)
-            }
-            return Unmanaged.passUnretained(event)
-        }, userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return }
-        fnTap = tap
-        fnSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        if let fnSource { CFRunLoopAddSource(CFRunLoopGetMain(), fnSource, .commonModes) }
-        CGEvent.tapEnable(tap: tap, enable: true)
-        diagnostics.notice("Fn monitoring installed")
-    }
-
-    private func handleFn(_ type: CGEventType, _ event: CGEvent) {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            fnPressed = false
-            fnChord = false
-            if let fnTap { CGEvent.tapEnable(tap: fnTap, enable: true) }
-            return
-        }
-        let code = event.getIntegerValueField(.keyboardEventKeycode)
-        let isFn = type == .flagsChanged && code == kVK_Function
-        if !isFn {
-            if fnPressed { fnChord = true }
-            return
-        }
-        if event.flags.contains(.maskSecondaryFn) {
-            if !fnPressed {
-                fnPressed = true
-                fnChord = !event.flags.intersection([.maskShift, .maskControl, .maskAlternate, .maskCommand]).isEmpty
-            }
-            return
-        }
-        let toggle = fnPressed && !fnChord
-        fnPressed = false
-        fnChord = false
-        guard toggle else { return }
-        DispatchQueue.main.async { [weak self] in
-            self?.toggleRecording()
-        }
-    }
-
     private func toggleRecording() {
         if recorder != nil { stopRecording() }
         else { startRecording(usingToggle: true) }
     }
 
-    @objc private func requestFnAccess() {
-        if CGPreflightListenEventAccess() {
-            installFnTap()
-            update("Fn toggles recording", symbol: "mic")
-        } else {
-            _ = CGRequestListenEventAccess()
-            update("Allow Input Monitoring to use Fn", symbol: "mic")
-            openPrivacyPane("Privacy_ListenEvent")
-        }
-    }
-
     @objc private func requestPasteAccess() {
         settings.set(true, forKey: "autoPaste")
-        pasteItem.state = .on
-        if AXIsProcessTrusted() {
-            update("Automatic paste is on", symbol: "mic")
-        } else {
+        if !AXIsProcessTrusted() {
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
-            update("Allow Accessibility to paste automatically", symbol: "mic")
             openPrivacyPane("Privacy_Accessibility")
         }
         refreshSetup()
+        refreshStatus()
     }
 
     private func openPrivacyPane(_ pane: String) {
@@ -606,26 +572,23 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
         guard !micRequestInProgress else { return }
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
-            if recorder == nil, !awaitingTranscript { update("Ready", symbol: "mic") }
+            refreshStatus()
             refreshSetup()
         case .notDetermined:
             micRequestInProgress = true
-            update("Allow microphone access to dictate", symbol: "mic.badge.plus")
+            refreshStatus()
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.micRequestInProgress = false
                     NSLog("Microphone authorization granted: %d", granted ? 1 : 0)
-                    self.update(granted ? "Ready" : "Microphone access is off",
-                                symbol: granted ? "mic" : "mic.slash")
+                    self.refreshStatus()
                     self.refreshSetup()
                 }
             }
         default:
-            update("Enable Microphone in Privacy & Security", symbol: "mic.slash")
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
-                NSWorkspace.shared.open(url)
-            }
+            refreshStatus()
+            openPrivacyPane("Privacy_Microphone")
         }
     }
 
@@ -657,15 +620,15 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
             destination = target
             recordingUsesToggle = usingToggle
             indicator.record(recorder)
-            update(usingToggle ? "Recording… tap the shortcut again to transcribe" : "Recording… release to transcribe", symbol: "mic.fill")
+            refreshStatus()
         } catch {
             try? FileManager.default.removeItem(at: url)
-            update("Microphone failed to start", symbol: "exclamationmark.circle")
+            indicator.finish("Microphone failed to start", success: false)
             NSLog("Recording failed: %@", String(describing: error))
         }
     }
 
-    private func stopRecording() {
+    @objc private func stopRecording() {
         guard let recorder, let url = recordingURL else { return }
         let duration = recorder.currentTime
         recorder.stop()
@@ -677,13 +640,12 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
         destination = nil
         guard duration >= 0.20 else {
             try? FileManager.default.removeItem(at: url)
-            indicator.hide()
-            update("Recording was too short", symbol: "mic")
+            indicator.finish("Recording was too short", success: false)
+            refreshStatus()
             return
         }
         awaitingTranscript = true
         indicator.processing()
-        update("Transcribing offline…", symbol: "ellipsis.circle")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result { try DictationApp.transcribe(url) }
             try? FileManager.default.removeItem(at: url)
@@ -701,7 +663,7 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
         recordingUsesToggle = false
         destination = nil
         try? FileManager.default.removeItem(at: url)
-        update("Recording discarded", symbol: "waveform")
+        refreshStatus()
         indicator.finish("Recording discarded")
     }
 
@@ -736,7 +698,7 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
         switch result {
         case .success(let transcript) where !transcript.isEmpty:
             lastTranscript = transcript
-            copyLast()
+            writeTranscriptToClipboard()
             indicator.finish("Copied to Clipboard")
             guard settings.bool(forKey: "autoPaste"), AXIsProcessTrusted(),
                   let target, target.element != nil, !target.application.isTerminated,
@@ -754,11 +716,9 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
             paste(to: target, clipboardVersion: clipboardVersion, attempts: 5)
         case .success:
             awaitingTranscript = false
-            update("No speech recognized", symbol: "mic")
             indicator.finish("No speech recognized", success: false)
         case .failure(let error):
             awaitingTranscript = false
-            update("Transcription failed", symbol: "exclamationmark.circle")
             indicator.finish("Transcription failed", success: false)
             diagnostics.error("Transcription failed: \(String(describing: error), privacy: .public)")
         }
@@ -799,7 +759,6 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
         up.flags = .maskCommand
         down.postToPid(pid)
         up.postToPid(pid)
-        update("Transcript pasted", symbol: "mic")
         indicator.finish("Transcript pasted")
         diagnostics.notice("Sent paste to dictation target")
     }
@@ -807,25 +766,65 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
     @objc private func togglePaste() {
         if settings.bool(forKey: "autoPaste") {
             settings.set(false, forKey: "autoPaste")
-            pasteItem.state = .off
-            update("Transcripts will be copied", symbol: "mic")
+            refreshSetup()
+            refreshStatus()
         } else {
             requestPasteAccess()
         }
     }
 
     @objc private func copyLast() {
-        guard !lastTranscript.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(lastTranscript, forType: .string)
-        update("Copied transcript · paste with Command–V", symbol: "mic")
+        guard validateMenuItem(copyItem) else { return }
+        writeTranscriptToClipboard()
     }
 
-    private func update(_ message: String, symbol: String) {
+    private func writeTranscriptToClipboard() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lastTranscript, forType: .string)
+    }
+
+    private func refreshStatus() {
+        let message: String
+        let symbol: String
+        if recorder != nil {
+            message = recordingUsesToggle ? "Recording…" : "Recording · Release to transcribe"
+            symbol = "mic.fill"
+        } else if awaitingTranscript {
+            message = "Transcribing…"
+            symbol = "ellipsis.circle"
+        } else if ModelAssets.installedModel == nil {
+            switch modelState {
+            case .downloading: message = "Downloading speech model…"
+            case .verifying: message = "Verifying speech model…"
+            case .failed: message = "Model download failed"
+            default: message = "Speech model required"
+            }
+            symbol = "waveform"
+        } else if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
+            message = "Microphone access required"
+            symbol = "mic.slash"
+        } else if toggleShortcut == nil && shortcut == nil {
+            message = "Shortcuts unavailable"
+            symbol = "waveform"
+        } else if settings.bool(forKey: "autoPaste") && !AXIsProcessTrusted() {
+            message = "Ready · Copies to clipboard"
+            symbol = "waveform"
+        } else {
+            message = "Ready"
+            symbol = "waveform"
+        }
+        guard let button = statusItem.button else { return }
         menuHeader.setStatus(message)
-        let name = symbol == "mic" ? "waveform" : symbol
-        statusItem.button?.image = NSImage(systemSymbolName: name, accessibilityDescription: "Nemotron Dictation")
-        statusItem.button?.toolTip = message
+        let description = "Nemotron Dictation, \(message)"
+        if button.toolTip != description {
+            let configuration = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(configuration)
+            image?.isTemplate = true
+            button.image = image
+            button.toolTip = description
+            button.setAccessibilityLabel(description)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -833,8 +832,6 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMen
         if let recordingURL { try? FileManager.default.removeItem(at: recordingURL) }
         indicator.hide()
         permissionTimer?.invalidate()
-        if let fnSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), fnSource, .commonModes) }
-        if let fnTap { CFMachPortInvalidate(fnTap) }
         if let shortcut { UnregisterEventHotKey(shortcut) }
         if let toggleShortcut { UnregisterEventHotKey(toggleShortcut) }
         if let handler { RemoveEventHandler(handler) }

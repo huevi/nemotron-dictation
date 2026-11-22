@@ -106,13 +106,14 @@ final class SetupWindow: NSWindowController {
             "Optional: allow Accessibility to paste into the field where you started."
         allowPaste.isEnabled = !pasteEnabled || !pasteGranted
         if toggleAvailable {
-            shortcuts.stringValue = "Click in the field below. Press ⌃ Space to start, speak, then press it again to transcribe."
+            let hint = holdAvailable ? "" : " The hold shortcut is unavailable."
+            shortcuts.stringValue = "Click below. Press ⌃Space to start and again to transcribe.\(hint)"
         } else if holdAvailable {
-            shortcuts.stringValue = "⌃ Space is in use. Click below, then hold ⌃⌥ Space to talk and release to transcribe."
+            shortcuts.stringValue = "⌃Space is unavailable. Click below, then hold ⌃⌥Space to talk and release to transcribe."
         } else {
-            shortcuts.stringValue = "Both shortcuts are in use. Free one in Keyboard Shortcuts, then reopen the app."
+            shortcuts.stringValue = "Both shortcuts are unavailable. Free one in Keyboard Shortcuts, then reopen the app."
         }
-        keyboard.isHidden = toggleAvailable
+        keyboard.isHidden = toggleAvailable && holdAvailable
         done.isEnabled = modelInstalled && micGranted
         window?.contentView?.layoutSubtreeIfNeeded()
     }
